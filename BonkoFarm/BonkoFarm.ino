@@ -1,6 +1,23 @@
+/***************************************************
+ This code is for an automatic planting project made in Arduino
+ with the ability to send and get datas from Serial port
+
+ Created 2023-08-13
+ By Alexis KNOB <https://www.bonko.fr>
+
+/***********Notice and Trouble shooting***************
+ 1.Connection and Diagram can be found here: https://www.bonko.fr
+ 2.This code is tested on Arduino Mega.
+ 3.Sensors are connect to Analog 8 & 9 port.
+ ****************************************************/
+
 #include "RTClib.h"
 #include <Wire.h>
 #include <EEPROM.h>
+#include <avr/wdt.h>
+
+// General delay time
+#define DELAY_TIME 50
 
 // Define the pins for light and fan
 #define LIGHT_PIN 9
@@ -13,19 +30,16 @@
 #define FAN_DOWN_HOURS_ADDRESS 30
 
 // Soil moisture sensor calibration values
-const int AirValue = 455;
+const int AirValue = 510;
 const int WaterValue = 180;
-
-// General delay time
-const int DelayTime = 0;
 
 // Initialize RTC
 RTC_DS1307 rtc;
 char t[32];
 
 // Function prototypes
-String read_String(char add);
-void writeString(char add, String data);
+String read_String(int add);
+void writeString(int add, const String& data);
 void automaticDeviceControl(int pin, int upHourAddress, int downHourAddress);
 void checkPinState(int pin, int upHourAddress, int downHourAddress);
 
@@ -39,11 +53,11 @@ void handleGetLightHours();
 void handleGetFanHours();
 
 // Handler SET function prototypes for incoming commands
-void handleSetTime(String command);
-void handleSetLightState(String command);
-void handleSetFanState(String command);
-void handleSetLightHours(String command);
-void handleSetFanHours(String command);
+void handleSetTime(const String& datas);
+void handleSetLightState(const String& datas);
+void handleSetFanState(const String& datas);
+void handleSetLightHours(const String& datas);
+void handleSetFanHours(const String& datas);
 
 // Define GET command strings
 const String getCommands[] = {
@@ -96,23 +110,36 @@ void setup() {
   pinMode(LIGHT_PIN, OUTPUT);
   pinMode(FAN_PIN, OUTPUT);
   Serial.begin(9600);
+  wdt_disable();
 
   // Initialize RTC
   Wire.begin();
   rtc.begin();
   
+  // Vérifier si le système a redémarré à cause du watchdog timer
+  if (MCUSR & _BV(WDRF)) {
+    MCUSR &= ~_BV(WDRF);
+    Serial.println("System restarted using watchdog timer");
+  }
+
   // Check if RTC is running
   if (!rtc.isrunning()) {
     Serial.println("RTC is NOT running!");
     rtc.adjust(DateTime(__DATE__, __TIME__));
   }
+  //rtc.adjust(DateTime(2023, 9, 19, 17, 3, 0));
   
   // Set initial state of PINs based on EEPROM values and current time
   checkPinState(LIGHT_PIN, LIGHT_UP_HOURS_ADDRESS, LIGHT_DOWN_HOURS_ADDRESS);
   checkPinState(FAN_PIN, FAN_UP_HOURS_ADDRESS, FAN_DOWN_HOURS_ADDRESS);
+
+  // Active and set Watchdog timer on 8 seconds
+  wdt_enable(WDTO_8S);
 }
 
 void loop() {
+  wdt_reset();
+
   // Check for incoming commands from Raspberry Pi
   if (Serial.available()) {
     String dataRead = Serial.readStringUntil('\n');
@@ -123,7 +150,7 @@ void loop() {
     int idx = dataRead.lastIndexOf(":");
     if (idx != -1) {
       command = dataRead.substring(0, idx);
-      datas = dataRead.substring(idx);
+      datas = dataRead.substring(idx + 1, dataRead.length());
     }
     
     // Match command with its handler
@@ -146,32 +173,27 @@ void loop() {
   automaticDeviceControl(LIGHT_PIN, LIGHT_UP_HOURS_ADDRESS, LIGHT_DOWN_HOURS_ADDRESS);
   automaticDeviceControl(FAN_PIN, FAN_UP_HOURS_ADDRESS, FAN_DOWN_HOURS_ADDRESS);
   
-  delay(DelayTime);
+  delay(DELAY_TIME);
 }
 
-void writeString(char add, String data) {
-  int _size = data.length();
-  int i;
-  for(i=0;i<_size;i++)
-  {
-    EEPROM.write(add+i,data[i]);
+void writeString(int add, const String& data) {
+  int len = data.length();
+  for (int i = 0; i < len; i++) {
+    EEPROM.write(add + i, data[i]);
   }
-  EEPROM.write(add+_size,'\0');
+  EEPROM.write(add + len, '\0');
 }
 
-String read_String(char add) {
-  int i;
+String read_String(int add) {
   char data[100];
-  int len=0;
-  unsigned char k;
-  k=EEPROM.read(add);
-  while(k != '\0' && len<500)
-  {    
-    k=EEPROM.read(add+len);
-    data[len]=k;
+  int len = 0;
+  char k;
+  do {
+    k = EEPROM.read(add + len);
+    data[len] = k;
     len++;
-  }
-  data[len]='\0';
+  } while (k != '\0' && len < 100); // Added upper limit
+  data[len] = '\0';
   return String(data);
 }
 
@@ -181,16 +203,17 @@ void automaticDeviceControl(int pin, int upHourAddress, int downHourAddress) {
   String upHours = read_String(upHourAddress);
   String downHours = read_String(downHourAddress);
 
-  // Extraire les heures et les minutes
+  // Extract hours and minutes
   int upHour = atoi(upHours.substring(0, 2).c_str());
   int upMinute = atoi(upHours.substring(3, 5).c_str());
   int downHour = atoi(downHours.substring(0, 2).c_str());
   int downMinute = atoi(downHours.substring(3, 5).c_str());
 
+  // Compare hours and minutes for automatic light control
   if (upHour == now.hour() && upMinute == now.minute()) {
-    digitalWrite(pin, LOW);  // Mettre le PIN à LOW pour allumer le dispositif
+    digitalWrite(pin, LOW);
   } else if (downHour == now.hour() && downMinute == now.minute()) {
-    digitalWrite(pin, HIGH);  // Mettre le PIN à HIGH pour éteindre le dispositif
+    digitalWrite(pin, HIGH);
   }
 }
 
@@ -259,47 +282,45 @@ void handleGetFanHours() {
 }
 
 // SET FUNCTIONS
-void handleSetTime(String command) {
-  int years = atoi(command.substring(0, 2).c_str());
-  int months = atoi(command.substring(3, 5).c_str());
-  int days = atoi(command.substring(6, 8).c_str());
-  int hour = atoi(command.substring(9, 11).c_str());
-  int minutes = atoi(command.substring(12, 14).c_str());
-  int secondes = atoi(command.substring(15, 17).c_str());
-  rtc.adjust(DateTime(years, months, days, hour, minutes, secondes));
-}
+void handleSetTime(const String& datas) {
+  if (datas.length() == 20) {
+    int year = datas.substring(0, 4).toInt();
+    int month = datas.substring(5, 7).toInt();
+    int day = datas.substring(8, 10).toInt();
+    int hour = datas.substring(11, 13).toInt();
+    int minute = datas.substring(14, 16).toInt();
+    int second = datas.substring(17, 19).toInt();
 
-void handleSetLightState(String command) {
-  if (digitalRead(LIGHT_PIN) == HIGH) {
-    digitalWrite(LIGHT_PIN, LOW);
+    rtc.adjust(DateTime(year, month, day, hour, minute, second));
   } else {
-    digitalWrite(LIGHT_PIN, HIGH);
+    return;
   }
 }
 
-void handleSetFanState(String command) {
-  if (digitalRead(FAN_PIN) == HIGH) {
-    digitalWrite(FAN_PIN, LOW);
-  } else {
-    digitalWrite(FAN_PIN, HIGH);
-  }
+
+void handleSetLightState(const String& datas) {
+  digitalWrite(LIGHT_PIN, datas == "1" ? LOW : HIGH);
 }
 
-void handleSetLightHours(String command) {
-  int delimiterIndex = command.indexOf('/');
+void handleSetFanState(const String& datas) {
+  digitalWrite(FAN_PIN, datas == "1" ? LOW : HIGH);
+}
+
+void handleSetLightHours(const String& datas) {
+  int delimiterIndex = datas.indexOf('/');
   if (delimiterIndex != -1) {
-    String up_hour = command.substring(0, delimiterIndex);
-    String down_hour = command.substring(delimiterIndex + 1);
+    String up_hour = datas.substring(0, delimiterIndex);
+    String down_hour = datas.substring(delimiterIndex + 1);
     writeString(LIGHT_UP_HOURS_ADDRESS, up_hour);
     writeString(LIGHT_DOWN_HOURS_ADDRESS, down_hour);
   }
 }
 
-void handleSetFanHours(String command) {
-  int delimiterIndex = command.indexOf('/');
+void handleSetFanHours(const String& datas) {
+  int delimiterIndex = datas.indexOf('/');
   if (delimiterIndex != -1) {
-    String up_hour = command.substring(0, delimiterIndex);
-    String down_hour = command.substring(delimiterIndex + 1);
+    String up_hour = datas.substring(0, delimiterIndex);
+    String down_hour = datas.substring(delimiterIndex + 1);
     writeString(FAN_UP_HOURS_ADDRESS, up_hour);
     writeString(FAN_DOWN_HOURS_ADDRESS, down_hour);
   }
